@@ -4,7 +4,7 @@ from homeassistant.core import callback
 from homeassistant.const import CONF_API_KEY, CONF_URL
 from homeassistant.helpers import selector
 
-DOMAIN = "echolocal_ai"
+DOMAIN = "System_1-2_Dual_AI"
 
 DEFAULT_SYS1 = "You are a smart home router. The user is in the '{room}'. If the command controls a device, match it to the exact entity_id below and return JSON with 'domain', 'service', and 'entity_id'. If it is a general question, return: {\"domain\": \"chat\", \"service\": \"chat\", \"entity_id\": \"none\"}\n\nAVAILABLE ENTITIES:\n{entities}\n\nOutput ONLY raw JSON. No markdown formatting."
 DEFAULT_SYS2 = "You are a helpful smart home AI. The current time is {time}. If the user asked a question, answer it concisely. If the user issued a device command, summarize the Action State into a natural, single-sentence spoken reply."
