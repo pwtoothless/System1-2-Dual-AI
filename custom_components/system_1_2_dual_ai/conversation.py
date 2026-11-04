@@ -97,12 +97,22 @@ class DualModelConversationEntity(conversation.ConversationEntity):
         domain = action_data.get("domain")
         service = action_data.get("service")
         entity_id = action_data.get("entity_id")
+        
+        # Build service data and inject custom LLM variables (e.g., music_query)
+        service_data = {}
+        if entity_id and entity_id.lower() != "none":
+            service_data["entity_id"] = entity_id
+            
+        for key, value in action_data.items():
+            if key not in ["domain", "service", "entity_id"]:
+                service_data[key] = value
+
         action_state = {"status": "skipped", "message": "User asked a general question."}
         
-        if domain != "chat" and domain and service and entity_id:
+        if domain != "chat" and domain and service:
             try:
-                await self.hass.services.async_call(domain, service, {"entity_id": entity_id}, blocking=True)
-                action_state = {"status": "success", "action": f"{service} {entity_id}"}
+                await self.hass.services.async_call(domain, service, service_data, blocking=True)
+                action_state = {"status": "success", "action": f"{service} executed"}
             except Exception as e:
                 action_state = {"status": "error", "message": str(e)}
 
