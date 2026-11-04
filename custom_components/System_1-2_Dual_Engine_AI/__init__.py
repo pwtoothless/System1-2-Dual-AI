@@ -3,7 +3,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
 
 _LOGGER = logging.getLogger(__name__)
-DOMAIN = "echolocal_ai"
+DOMAIN = "system_1_2_dual_ai"
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up the integration and listen for live updates."""
