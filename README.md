@@ -17,5 +17,5 @@ By splitting the voice pipeline into a **System 1 Decision Engine** (for zero-la
 4. Click **Download** and restart Home Assistant.
 
 ## Configuration
-Go to **Settings > Devices & Services > Add Integration** and search for "Echolocal Dual AI".
+Go to **Settings > Devices & Services > Add Integration** and search for "System 1 & 2 Dual AI".
 You will be prompted to select your inference providers (Ollama or OpenRouter) and specify the model endpoints and API keys.

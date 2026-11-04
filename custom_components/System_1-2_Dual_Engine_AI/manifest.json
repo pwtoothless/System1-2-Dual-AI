@@ -1,0 +1,10 @@
+{
+  "domain": "System_1-2_Dual_AI",
+  "name": "System 1 & 2 Dual AI",
+  "codeowners": ["@pwtoothless"],
+  "dependencies": ["conversation"],
+  "config_flow": true,
+  "integration_type": "hub",
+  "iot_class": "local_push",
+  "version": "1.0.0"
+}
