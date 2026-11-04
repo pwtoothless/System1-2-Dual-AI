@@ -9,7 +9,9 @@ from homeassistant.const import CONF_API_KEY, CONF_URL
 _LOGGER = logging.getLogger(__name__)
 
 async def async_setup_entry(hass, config_entry, async_add_entities):
-    async_add_entities([DualModelConversationEntity(hass, config_entry.data)])
+    config_data = dict(config_entry.data)
+    config_data.update(config_entry.options)
+    async_add_entities([DualModelConversationEntity(hass, config_data)])
 
 class DualModelConversationEntity(conversation.ConversationEntity):
     _attr_has_entity_name = True
@@ -20,13 +22,14 @@ class DualModelConversationEntity(conversation.ConversationEntity):
         self.hass = hass
         self.config_data = config_data
         self.or_url = "https://openrouter.ai/api/v1/chat/completions"
+        self.default_sys1 = "You are a smart home router. The user is in the '{room}'. If the command controls a device, match it to the exact entity_id below and return JSON with 'domain', 'service', and 'entity_id'. If it is a general question, return: {\"domain\": \"chat\", \"service\": \"chat\", \"entity_id\": \"none\"}\n\nAVAILABLE ENTITIES:\n{entities}\n\nOutput ONLY raw JSON. No markdown formatting."
+        self.default_sys2 = "You are a helpful smart home AI. The current time is {time}. If the user asked a question, answer it concisely. If the user issued a device command, summarize the Action State into a natural, single-sentence spoken reply."
 
     @property
     def supported_languages(self) -> list[str] | str:
         return "*"
 
     async def _call_llm(self, session, provider, model, sys_prompt, user_prompt, is_json=False):
-        """Helper to route API calls based on the chosen provider."""
         if provider == "Ollama":
             url = self.config_data.get(CONF_URL)
             full_prompt = f"{sys_prompt}\n\n{user_prompt}"
@@ -72,13 +75,8 @@ class DualModelConversationEntity(conversation.ConversationEntity):
         entity_list_str = "\n".join(entities)
 
         # 2. System 1: Decision Model
-        sys1_prompt = (
-            f"You are a smart home router. The user is in the '{room_context}'. "
-            "If the command controls a device, match it to the exact entity_id below and return JSON with 'domain', 'service', and 'entity_id'. "
-            "If it is a general question, return: {\"domain\": \"chat\", \"service\": \"chat\", \"entity_id\": \"none\"}\n\n"
-            f"AVAILABLE ENTITIES:\n{entity_list_str}\n\n"
-            "Output ONLY raw JSON. No markdown formatting."
-        )
+        sys1_template = self.config_data.get("sys1_prompt", self.default_sys1)
+        sys1_prompt = sys1_template.replace("{room}", room_context).replace("{entities}", entity_list_str)
         
         try:
             raw_response = await self._call_llm(
@@ -110,11 +108,12 @@ class DualModelConversationEntity(conversation.ConversationEntity):
 
         # 4. System 2: Conversational Model
         current_time = datetime.datetime.now().strftime("%I:%M %p on %A, %B %d")
+        sys2_template = self.config_data.get("sys2_prompt", self.default_sys2)
+        sys2_prompt = sys2_template.replace("{time}", current_time)
+
         if action_data.get("domain") == "chat":
-            sys2_prompt = f"You are a helpful smart home AI. The current time is {current_time}. Answer concisely in one sentence."
             sys2_user = user_input.text
         else:
-            sys2_prompt = "Summarize this smart home device action into a natural, single-sentence spoken reply."
             sys2_user = f"User Command: \"{user_input.text}\"\nAction State: {json.dumps(action_state)}"
         
         try:
