@@ -15,13 +15,12 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
 
 class DualModelConversationEntity(conversation.ConversationEntity):
     _attr_has_entity_name = True
-    _attr_name = "Echolocal Dual AI"
+    _attr_name = "System 1 & 2 Dual AI"
     _attr_supported_features = conversation.ConversationEntityFeature.CONTROL
 
     def __init__(self, hass, config_data):
         self.hass = hass
         self.config_data = config_data
-        self.or_url = "https://openrouter.ai/api/v1/chat/completions"
         self.default_sys1 = "You are a smart home router. The user is in the '{room}'. If the command controls a device, match it to the exact entity_id below and return JSON with 'domain', 'service', and 'entity_id'. If it is a general question, return: {\"domain\": \"chat\", \"service\": \"chat\", \"entity_id\": \"none\"}\n\nAVAILABLE ENTITIES:\n{entities}\n\nOutput ONLY raw JSON. No markdown formatting."
         self.default_sys2 = "You are a helpful smart home AI. The current time is {time}. If the user asked a question, answer it concisely. If the user issued a device command, summarize the Action State into a natural, single-sentence spoken reply."
 
@@ -42,15 +41,22 @@ class DualModelConversationEntity(conversation.ConversationEntity):
                 return res.get("response", "").strip()
                 
         elif provider == "OpenRouter":
+            # Dynamically route decision models to the alpha endpoint
+            if model in ["liquid/d1.1"] or model.startswith("typesafe/"):
+                api_url = "https://openrouter.ai/api/alpha/decisions"
+            else:
+                api_url = "https://openrouter.ai/api/v1/chat/completions"
+
             headers = {"Authorization": f"Bearer {self.config_data.get(CONF_API_KEY)}", "Content-Type": "application/json"}
             payload = {
                 "model": model,
                 "messages": [{"role": "system", "content": sys_prompt}, {"role": "user", "content": user_prompt}],
                 "temperature": 0.0
             }
-            async with session.post(self.or_url, headers=headers, json=payload, timeout=10) as resp:
+            async with session.post(api_url, headers=headers, json=payload, timeout=10) as resp:
                 res = await resp.json()
-                if "error" in res: raise Exception(res["error"])
+                if "error" in res: raise Exception(str(res["error"]))
+                
                 text = res["choices"][0]["message"]["content"].strip()
                 if is_json and text.startswith("```"):
                     text = text.split("```")[1]
