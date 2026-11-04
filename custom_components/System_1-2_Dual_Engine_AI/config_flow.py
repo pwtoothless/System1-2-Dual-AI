@@ -2,14 +2,14 @@ import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.const import CONF_API_KEY, CONF_URL
 
-DOMAIN = "echolocal_ai"
+DOMAIN = "System_1-2_Dual_AI"
 
 class EcholocalAIFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
     VERSION = 1
 
     async def async_step_user(self, user_input=None):
         if user_input is not None:
-            return self.async_create_entry(title="Echolocal Dual Engine", data=user_input)
+            return self.async_create_entry(title="System 1 & 2 Dual AI", data=user_input)
 
         schema = vol.Schema({
             vol.Required("sys1_provider", default="Ollama"): vol.In(["Ollama", "OpenRouter"]),
