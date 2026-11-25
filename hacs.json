@@ -1,5 +1,4 @@
 {
-  "name": "System 1 & 2 Dual Engine AI",
-  "render_readme": true,
-  "iot_class": "Local Push"
+  "name": "System 1 & 2 Dual AI",
+  "render_readme": true
 }
