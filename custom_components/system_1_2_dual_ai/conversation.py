@@ -20,6 +20,7 @@ from homeassistant.helpers import (
     device_registry as dr,
     entity_registry as er,
     intent,
+    service as service_helper,
 )
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -35,6 +36,7 @@ VALID_DOMAINS = {
     "media_player",
     "script",
     "scene",
+    "weather",
 }
 
 ACTION_SERVICE_MAP = {
@@ -110,12 +112,13 @@ class DualModelConversationEntity(conversation.ConversationEntity):
         self._attr_unique_id = entry_id
         self.config_data = config_data
         self.default_sys1 = (
-            "You are a smart home router. The user is in the '{room}'. "
+            "You are a smart home router. The user is in the '{room}' speaking via '{device}'. "
             "Pick the most appropriate action from the choices to fulfill the command. "
             "If the user asks a general question, select 'CHAT'."
         )
         self.default_sys2 = (
             "You are a helpful smart home AI. The current time is {time}. "
+            "The user is in '{room}' speaking via '{device}'. "
             "If the user asked a question, answer it concisely. "
             "If the user issued a device command, summarize the Action State into a natural, "
             "single-sentence spoken reply."
@@ -252,16 +255,66 @@ class DualModelConversationEntity(conversation.ConversationEntity):
 
         raise ValueError(f"Unsupported provider: {provider}")
 
-    def _resolve_room_context(self, device_id: str | None) -> str:
-        """Resolve the area name for the originating device."""
+    def _resolve_device_context(self, device_id: str | None) -> tuple[str, str]:
+        """Resolve the originating device name and area name."""
         if not device_id:
-            return "Unknown Area"
+            return "Unknown Device", "Unknown Area"
         device = dr.async_get(self.hass).async_get(device_id)
-        if device and device.area_id:
+        if not device:
+            return "Unknown Device", "Unknown Area"
+        raw_name = device.name_by_user or device.name
+        device_name = _normalize_text(raw_name) if raw_name else "Unknown Device"
+        room_name = "Unknown Area"
+        if device.area_id:
             area = ar.async_get(self.hass).async_get_area(device.area_id)
             if area:
-                return _normalize_text(area.name)
-        return "Unknown Area"
+                room_name = _normalize_text(area.name)
+        return device_name, room_name
+
+    @staticmethod
+    def _get_script_fields(
+        script_descriptions: dict[str, Any], entity_id: str
+    ) -> dict[str, dict[str, Any]]:
+        """Return field metadata for a script entity from service descriptions."""
+        if "." not in entity_id:
+            return {}
+        object_id = entity_id.split(".", 1)[1]
+        desc = script_descriptions.get(object_id)
+        if not isinstance(desc, dict):
+            return {}
+        fields = desc.get("fields")
+        if not isinstance(fields, dict):
+            return {}
+        return {k: v for k, v in fields.items() if isinstance(v, dict)}
+
+    @staticmethod
+    def _build_script_param_template(
+        fields: dict[str, dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Build a pre-filled JSON parameter template for a script."""
+        template: dict[str, Any] = {}
+        for field_name, field_info in fields.items():
+            if "default" in field_info and field_info["default"] is not None:
+                template[field_name] = field_info["default"]
+            else:
+                template[field_name] = ""
+        return template
+
+    @staticmethod
+    def _parse_json_object(text: str) -> dict[str, Any]:
+        """Extract and parse a JSON object from an LLM response."""
+        cleaned = (text or "").strip()
+        if cleaned.startswith("```"):
+            cleaned = re.sub(r"^```[a-zA-Z0-9_-]*\s*", "", cleaned)
+            cleaned = re.sub(r"\s*```$", "", cleaned).strip()
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start == -1 or end == -1 or end < start:
+            raise ValueError("No JSON object found in LLM response")
+        parsed = json.loads(cleaned[start : end + 1])
+        if not isinstance(parsed, dict):
+            raise ValueError("Parsed JSON is not an object")
+        return parsed
 
     def _get_entity_area_name(
         self,
@@ -286,7 +339,10 @@ class DualModelConversationEntity(conversation.ConversationEntity):
         return None
 
     def _build_choices_array(
-        self, room_context: str, user_text: str
+        self,
+        room_context: str,
+        user_text: str,
+        script_descriptions: dict[str, Any] | None = None,
     ) -> list[str]:
         """Build prioritized, available entity action choices for System 1."""
         ent_reg = er.async_get(self.hass)
@@ -335,8 +391,19 @@ class DualModelConversationEntity(conversation.ConversationEntity):
                 if tok in label_lower:
                     score += 30
 
-            if state.domain in ("script", "scene"):
+            if state.domain == "script":
+                fields = self._get_script_fields(script_descriptions or {}, eid)
+                if fields:
+                    template = self._build_script_param_template(fields)
+                    scored_choices.append(
+                        (score, f"EXECUTE {eid} ({label}) {json.dumps(template)}")
+                    )
+                else:
+                    scored_choices.append((score, f"EXECUTE {eid} ({label})"))
+            elif state.domain == "scene":
                 scored_choices.append((score, f"EXECUTE {eid} ({label})"))
+            elif state.domain == "weather":
+                scored_choices.append((score, f"GET_WEATHER {eid} ({label})"))
             elif state.domain == "cover":
                 if granularity == "state_aware":
                     action = "CLOSE" if state.state == "open" else "OPEN"
@@ -368,6 +435,14 @@ class DualModelConversationEntity(conversation.ConversationEntity):
         action = parts[0].upper()
         entity_id = parts[1] if len(parts) > 1 else "none"
         domain = entity_id.split(".")[0] if "." in entity_id else "chat"
+
+        if action == "GET_WEATHER" or domain == "weather":
+            return {
+                "domain": "weather",
+                "service": "get_weather",
+                "entity_id": entity_id,
+            }
+
         service = ACTION_SERVICE_MAP.get(action, "turn_on")
 
         action_data: dict[str, Any] = {
@@ -375,10 +450,15 @@ class DualModelConversationEntity(conversation.ConversationEntity):
             "service": service,
             "entity_id": entity_id,
         }
-        # Only pass music_query to scripts so standard domains (light, switch, etc.)
-        # do not fail schema validation with extra keys.
         if domain == "script":
-            action_data["music_query"] = raw_text
+            json_marker = cleaned.find(") {")
+            if json_marker != -1:
+                try:
+                    template = json.loads(cleaned[json_marker + 2 :])
+                    if isinstance(template, dict):
+                        action_data["script_template"] = template
+                except (json.JSONDecodeError, TypeError):
+                    pass
 
         return action_data
 
@@ -421,6 +501,63 @@ class DualModelConversationEntity(conversation.ConversationEntity):
 
         return attrs
 
+    async def _fetch_weather_context(self, entity_id: str) -> dict[str, Any]:
+        """Collect current weather state and daily/hourly forecasts for an entity."""
+        state = self.hass.states.get(entity_id)
+        if state is None:
+            return {"error": f"Weather entity {entity_id} not found."}
+
+        attr_keys = (
+            "friendly_name",
+            "temperature",
+            "temperature_unit",
+            "apparent_temperature",
+            "humidity",
+            "wind_speed",
+            "wind_speed_unit",
+            "wind_bearing",
+            "precipitation_unit",
+            "pressure",
+            "pressure_unit",
+            "visibility",
+            "visibility_unit",
+            "cloud_coverage",
+        )
+        current: dict[str, Any] = {"condition": state.state}
+        for key in attr_keys:
+            if key in state.attributes:
+                current[key] = state.attributes[key]
+
+        forecasts: dict[str, Any] = {}
+        for forecast_type in ("daily", "hourly"):
+            try:
+                resp = await self.hass.services.async_call(
+                    "weather",
+                    "get_forecasts",
+                    {"entity_id": entity_id, "type": forecast_type},
+                    blocking=True,
+                    return_response=True,
+                )
+                if isinstance(resp, dict):
+                    entity_resp = resp.get(entity_id) or {}
+                    items = entity_resp.get("forecast")
+                    if isinstance(items, list) and items:
+                        limit = 7 if forecast_type == "daily" else 24
+                        forecasts[forecast_type] = items[:limit]
+            except Exception as err:
+                _LOGGER.debug(
+                    "Could not fetch %s forecast for %s: %s",
+                    forecast_type,
+                    entity_id,
+                    err,
+                )
+
+        return {
+            "entity_id": entity_id,
+            "current": current,
+            "forecasts": forecasts,
+        }
+
     async def async_process(
         self, user_input: conversation.ConversationInput
     ) -> conversation.ConversationResult:
@@ -428,12 +565,27 @@ class DualModelConversationEntity(conversation.ConversationEntity):
         session = async_get_clientsession(self.hass)
         intent_response = intent.IntentResponse(language=user_input.language)
 
-        room_context = self._resolve_room_context(user_input.device_id)
-        choices_array = self._build_choices_array(room_context, user_input.text)
+        device_context, room_context = self._resolve_device_context(
+            user_input.device_id
+        )
+        try:
+            all_descriptions = await service_helper.async_get_all_descriptions(
+                self.hass
+            )
+            script_descriptions = all_descriptions.get("script", {})
+        except Exception as err:
+            _LOGGER.debug("Failed to load service descriptions: %s", err)
+            script_descriptions = {}
+
+        choices_array = self._build_choices_array(
+            room_context, user_input.text, script_descriptions
+        )
 
         sys1_template = self.config_data.get("sys1_prompt", self.default_sys1)
-        sys1_prompt = sys1_template.replace("{room}", room_context).replace(
-            "{entities}", ""
+        sys1_prompt = (
+            sys1_template.replace("{room}", room_context)
+            .replace("{device}", device_context)
+            .replace("{entities}", "")
         )
 
         try:
@@ -442,7 +594,11 @@ class DualModelConversationEntity(conversation.ConversationEntity):
                 self.config_data.get("sys1_provider"),
                 self.config_data.get("sys1_model"),
                 sys1_prompt,
-                f'Command: "{user_input.text}"',
+                (
+                    f'Room: "{room_context}"\n'
+                    f'Device: "{device_context}"\n'
+                    f'Command: "{user_input.text}"'
+                ),
                 choices_list=choices_array,
             )
             _LOGGER.debug("System 1 decision: %s", decision)
@@ -458,71 +614,189 @@ class DualModelConversationEntity(conversation.ConversationEntity):
         service = action_data.get("service")
         entity_id = action_data.get("entity_id")
 
-        service_data: dict[str, Any] = {}
-        if entity_id and str(entity_id).lower() != "none":
-            service_data["entity_id"] = entity_id
-
-        for key, value in action_data.items():
-            if key not in ("domain", "service", "entity_id"):
-                service_data[key] = value
-
-        action_state: dict[str, Any] = {
-            "status": "skipped",
-            "message": "User asked a general question.",
-        }
-
-        if domain != "chat" and domain and service:
-            target_state = self.hass.states.get(entity_id) if entity_id else None
-            if target_state is None or target_state.state in ("unavailable", "unknown"):
-                action_state = {
-                    "status": "error",
-                    "message": f"Target entity {entity_id} is unavailable.",
-                }
-                _LOGGER.warning("Skipping service call; %s is unavailable", entity_id)
-            else:
-                if domain == "light":
-                    light_attrs = self._extract_light_attributes(
-                        user_input.text, target_state
-                    )
-                    if light_attrs:
-                        # In state_aware mode, an already-on light only offers TURN_OFF;
-                        # if the user asked for brightness/color/temp, apply via turn_on.
-                        if service == "turn_off" and not re.search(
-                            r"\boff\b", user_input.text.lower()
-                        ):
-                            service = "turn_on"
-                        if service == "turn_on":
-                            service_data.update(light_attrs)
-                try:
-                    await self.hass.services.async_call(
-                        domain, service, service_data, blocking=True
-                    )
-                    action_state = {
-                        "status": "success",
-                        "action": f"{service} {entity_id}",
-                    }
-                except Exception as err:
-                    _LOGGER.warning(
-                        "Service call %s.%s failed for %s: %s",
-                        domain,
-                        service,
-                        entity_id,
-                        err,
-                    )
-                    action_state = {"status": "error", "message": str(err)}
-
         current_time = datetime.datetime.now().strftime("%I:%M %p on %A, %B %d")
         sys2_template = self.config_data.get("sys2_prompt", self.default_sys2)
-        sys2_prompt = sys2_template.replace("{time}", current_time)
+        sys2_prompt = (
+            sys2_template.replace("{time}", current_time)
+            .replace("{room}", room_context)
+            .replace("{device}", device_context)
+        )
 
-        if domain == "chat":
-            sys2_user = user_input.text
-        else:
-            sys2_user = (
-                f'User Command: "{user_input.text}"\n'
-                f"Action State: {json.dumps(action_state)}\n"
-                f"Decision Array Output: {decision}"
+        # Parameterized script: System 2 fills parameters from the original prompt,
+        # then we execute the script with those variables.
+        if domain == "script" and "script_template" in action_data:
+            target_state = self.hass.states.get(entity_id) if entity_id else None
+            if target_state is None or target_state.state in ("unavailable", "unknown"):
+                intent_response.async_set_speech(
+                    f"Target script {entity_id} is unavailable."
+                )
+                return conversation.ConversationResult(
+                    response=intent_response, conversation_id=user_input.conversation_id
+                )
+
+            script_fields = self._get_script_fields(script_descriptions, entity_id)
+            field_details: dict[str, dict[str, Any]] = {}
+            for fname, finfo in script_fields.items():
+                detail: dict[str, Any] = {}
+                for meta_key in ("description", "example", "required", "default"):
+                    if meta_key in finfo:
+                        detail[meta_key] = finfo[meta_key]
+                field_details[fname] = detail
+
+            param_sys2_prompt = (
+                f"{sys2_prompt}\n\n"
+                "You must fill the script parameters from the user's command and context. "
+                "Leave optional parameters as an empty string if the user did not specify them. "
+                'Reply ONLY with valid JSON: {"parameters": {...}, "reply": "<single-sentence spoken reply>"}.'
             )
+            param_sys2_user = (
+                f'Room: "{room_context}"\n'
+                f'Device: "{device_context}"\n'
+                f'User Command: "{user_input.text}"\n'
+                f"Script Entity: {entity_id}\n"
+                f"Parameter Template: {json.dumps(action_data['script_template'])}\n"
+                f"Field Details: {json.dumps(field_details)}"
+            )
+
+            try:
+                raw_sys2 = await self._call_llm(
+                    session,
+                    self.config_data.get("sys2_provider"),
+                    self.config_data.get("sys2_model"),
+                    param_sys2_prompt,
+                    param_sys2_user,
+                )
+                parsed = self._parse_json_object(raw_sys2)
+                raw_params = parsed.get("parameters")
+                if not isinstance(raw_params, dict):
+                    raw_params = {}
+                spoken_reply = str(parsed.get("reply") or "").strip()
+            except Exception as err:
+                _LOGGER.error("System 2 script parameter error: %s", err)
+                intent_response.async_set_speech(
+                    "I could not determine the parameters for that script."
+                )
+                return conversation.ConversationResult(
+                    response=intent_response, conversation_id=user_input.conversation_id
+                )
+
+            variables: dict[str, Any] = {}
+            for key, val in raw_params.items():
+                is_required = bool(script_fields.get(key, {}).get("required"))
+                if val not in (None, "") or is_required:
+                    variables[key] = val
+
+            try:
+                await self.hass.services.async_call(
+                    "script",
+                    "turn_on",
+                    {"entity_id": entity_id, "variables": variables},
+                    blocking=True,
+                )
+                if not spoken_reply:
+                    spoken_reply = "Done."
+            except Exception as err:
+                _LOGGER.warning(
+                    "Parameterized script call failed for %s: %s", entity_id, err
+                )
+                spoken_reply = f"Sorry, I couldn't run that script: {err}"
+
+            intent_response.async_set_speech(spoken_reply)
+            return conversation.ConversationResult(
+                response=intent_response, conversation_id=user_input.conversation_id
+            )
+
+        # Weather query: fetch current state + daily/hourly forecasts and pass to System 2.
+        if domain == "weather":
+            target_state = self.hass.states.get(entity_id) if entity_id else None
+            if target_state is None or target_state.state in ("unavailable", "unknown"):
+                sys2_user = (
+                    f'Room: "{room_context}"\n'
+                    f'Device: "{device_context}"\n'
+                    f'User Question: "{user_input.text}"\n'
+                    f"Weather Data: {json.dumps({'error': f'Weather entity {entity_id} is unavailable.'})}"
+                )
+            else:
+                weather_ctx = await self._fetch_weather_context(entity_id)
+                sys2_user = (
+                    f'Room: "{room_context}"\n'
+                    f'Device: "{device_context}"\n'
+                    f'User Question: "{user_input.text}"\n'
+                    f"Weather Data: {json.dumps(weather_ctx)}"
+                )
+        else:
+            service_data: dict[str, Any] = {}
+            if entity_id and str(entity_id).lower() != "none":
+                service_data["entity_id"] = entity_id
+
+            for key, value in action_data.items():
+                if key not in ("domain", "service", "entity_id", "script_template"):
+                    service_data[key] = value
+
+            action_state: dict[str, Any] = {
+                "status": "skipped",
+                "message": "User asked a general question.",
+            }
+
+            if domain != "chat" and domain and service:
+                target_state = self.hass.states.get(entity_id) if entity_id else None
+                if target_state is None or target_state.state in (
+                    "unavailable",
+                    "unknown",
+                ):
+                    action_state = {
+                        "status": "error",
+                        "message": f"Target entity {entity_id} is unavailable.",
+                    }
+                    _LOGGER.warning(
+                        "Skipping service call; %s is unavailable", entity_id
+                    )
+                else:
+                    if domain == "light":
+                        light_attrs = self._extract_light_attributes(
+                            user_input.text, target_state
+                        )
+                        if light_attrs:
+                            # In state_aware mode, an already-on light only offers TURN_OFF;
+                            # if the user asked for brightness/color/temp, apply via turn_on.
+                            if service == "turn_off" and not re.search(
+                                r"\boff\b", user_input.text.lower()
+                            ):
+                                service = "turn_on"
+                            if service == "turn_on":
+                                service_data.update(light_attrs)
+                    try:
+                        await self.hass.services.async_call(
+                            domain, service, service_data, blocking=True
+                        )
+                        action_state = {
+                            "status": "success",
+                            "action": f"{service} {entity_id}",
+                        }
+                    except Exception as err:
+                        _LOGGER.warning(
+                            "Service call %s.%s failed for %s: %s",
+                            domain,
+                            service,
+                            entity_id,
+                            err,
+                        )
+                        action_state = {"status": "error", "message": str(err)}
+
+            if domain == "chat":
+                sys2_user = (
+                    f'Room: "{room_context}"\n'
+                    f'Device: "{device_context}"\n'
+                    f'Question: "{user_input.text}"'
+                )
+            else:
+                sys2_user = (
+                    f'Room: "{room_context}"\n'
+                    f'Device: "{device_context}"\n'
+                    f'User Command: "{user_input.text}"\n'
+                    f"Action State: {json.dumps(action_state)}\n"
+                    f"Decision Array Output: {decision}"
+                )
 
         try:
             spoken_reply = await self._call_llm(

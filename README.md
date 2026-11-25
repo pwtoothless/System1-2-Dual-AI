@@ -42,7 +42,9 @@ User Command ("Turn on Desk LED's in Peytons Room")
 - **Security-First Default (`Assist-Exposed Entities Only`):** Enabled by default so System 1 can only see and control entities you explicitly expose under **Settings → Voice Assistants → Expose**.
 - **Configurable Device Control Granularity:** Choose between **Full**, **Compact**, and **Minimal (State-Aware)** action sets to stay comfortably within OpenRouter's **255-option** per-decision limit.
 - **Availability Guard & Smart Matching:** Automatically excludes `unavailable` / `unknown` entities from choices, verifies availability before calling services, normalizes curly apostrophes/quotes (e.g., `Desk LED’s` → `Desk LED's`), and includes each entity's Area name in its choice label.
-- **Script Parameter Forwarding:** Automatically passes the raw user command as `music_query` when executing `script.*` entities, while keeping standard domains (`light`, `switch`, etc.) free of extra schema keys.
+- **Script Parameter Forwarding (Auto-Discovered Fields):** Automatically inspects Home Assistant script `fields` and includes pre-filled JSON parameter templates in System 1's choices. When System 1 selects a parameterized script, System 2 fills in the parameters from your original prompt (using `{room}` and `{device}` context) and executes the script with those variables.
+- **Weather & Forecast Support:** Includes Assist-exposed `weather.*` entities as `GET_WEATHER` choices in System 1, automatically fetching current conditions plus `daily` and `hourly` forecasts (`weather.get_forecasts`) for System 2 to answer today/tomorrow weather questions.
+- **Originating Device & Room Context:** Resolves both the speaking satellite device (`{device}`) and its area (`{room}`) from `device_id` and passes them to both System 1 and System 2.
 - **Light Brightness, Color & White Temperature:** Extracts percentage brightness (`brightness_pct`), warm/cool white presets (`color_temp_kelvin`), and named RGB colors (`rgb_color`) directly from your command when turning on lights—without adding extra choices to the 255-option decision budget.
 - **Live Options Flow:** Update providers, models, prompts, security scope, granularity, and credentials from the UI at any time without removing the integration.
 
@@ -71,7 +73,8 @@ System 1 only needs to select `TURN_ON <light.entity>`—it does **not** need se
 | :--- | :--- | :--- | :--- |
 | `light`, `switch`, `climate`, `fan`, `media_player` | `TURN_ON`, `TURN_OFF`, `TOGGLE` | `TURN_ON`, `TURN_OFF` | `TURN_OFF` (if `on`) or `TURN_ON` (if `off`) |
 | `cover` | `OPEN`, `CLOSE` | `OPEN`, `CLOSE` | `CLOSE` (if `open`) or `OPEN` (if `closed`) |
-| `script`, `scene` | `EXECUTE` | `EXECUTE` | `EXECUTE` |
+| `script`, `scene` | `EXECUTE` (with pre-filled JSON template for parameterized scripts) | `EXECUTE` | `EXECUTE` |
+| `weather` | `GET_WEATHER` | `GET_WEATHER` | `GET_WEATHER` |
 
 ---
 
