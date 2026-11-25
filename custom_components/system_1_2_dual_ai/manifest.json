@@ -1,6 +1,7 @@
 {
   "domain": "system_1_2_dual_ai",
   "name": "System 1 & 2 Dual AI",
+  "categories": ["ai_voice.voice_assistants"],
   "codeowners": ["@pwtoothless"],
   "config_flow": true,
   "dependencies": ["conversation"],
