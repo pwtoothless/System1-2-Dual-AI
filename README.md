@@ -1,8 +1,10 @@
-# System 1 & 2 Dual AI for Home Assistant
+# System 1 & 2 Dual AI for Home Assistant 
 
 A dual-model conversation agent for Home Assistant's Assist voice and chat pipelines.
 
 By splitting each turn into a **System 1 Decision Engine** (fast, deterministic intent-to-entity routing) and a **System 2 Conversational Engine** (natural spoken/text reply generation), this integration avoids the high latency, token bloat, and tool-calling hallucinations of single-LLM smart home assistants.
+
+[![Open your Home Assistant instance and open a repository in the Marketplace.](https://my.home-assistant.io/badges/marketplace_repository.svg)](https://my.home-assistant.io/redirect/marketplace_repository/?owner=pwtoothless&category=Intigration&repository=System1-2-Dual-AI)
 
 ---
 
