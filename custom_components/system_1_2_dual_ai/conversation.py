@@ -425,7 +425,25 @@ class DualModelConversationEntity(conversation.ConversationEntity):
         scored_choices.sort(key=lambda item: item[0], reverse=True)
         return ["CHAT"] + [choice for _, choice in scored_choices]
 
-    def _parse_decision(self, decision: str, raw_text: str) -> dict[str, Any]:
+    @staticmethod
+    def _extract_allowed_entries(choices_array: list[str]) -> set[tuple[str, str]]:
+        """Extract the set of offered (action, entity_id) pairs from choices_array."""
+        allowed: set[tuple[str, str]] = set()
+        for choice in choices_array:
+            cleaned = (choice or "").strip()
+            if not cleaned or cleaned.upper() == "CHAT":
+                continue
+            parts = cleaned.split(" ", 2)
+            if len(parts) >= 2:
+                allowed.add((parts[0].upper(), parts[1]))
+        return allowed
+
+    def _parse_decision(
+        self,
+        decision: str,
+        raw_text: str,
+        allowed_entries: set[tuple[str, str]] | None = None,
+    ) -> dict[str, Any]:
         """Parse System 1's selected choice into a service call dict."""
         cleaned = (decision or "").strip()
         if not cleaned or cleaned.upper() == "CHAT":
@@ -434,6 +452,20 @@ class DualModelConversationEntity(conversation.ConversationEntity):
         parts = cleaned.split(" ")
         action = parts[0].upper()
         entity_id = parts[1] if len(parts) > 1 else "none"
+
+        if allowed_entries is not None and (action, entity_id) not in allowed_entries:
+            _LOGGER.warning(
+                "Rejected System 1 decision not in offered choices: action=%s entity_id=%s",
+                action,
+                entity_id,
+            )
+            return {
+                "domain": "not_found",
+                "service": "not_found",
+                "entity_id": entity_id,
+                "rejected": True,
+            }
+
         domain = entity_id.split(".")[0] if "." in entity_id else "chat"
 
         if action == "GET_WEATHER" or domain == "weather":
@@ -580,6 +612,7 @@ class DualModelConversationEntity(conversation.ConversationEntity):
         choices_array = self._build_choices_array(
             room_context, user_input.text, script_descriptions
         )
+        allowed_entries = self._extract_allowed_entries(choices_array)
 
         sys1_template = self.config_data.get("sys1_prompt", self.default_sys1)
         sys1_prompt = (
@@ -602,7 +635,9 @@ class DualModelConversationEntity(conversation.ConversationEntity):
                 choices_list=choices_array,
             )
             _LOGGER.debug("System 1 decision: %s", decision)
-            action_data = self._parse_decision(decision, user_input.text)
+            action_data = self._parse_decision(
+                decision, user_input.text, allowed_entries=allowed_entries
+            )
         except Exception as err:
             _LOGGER.error("System 1 Error: %s", err)
             intent_response.async_set_speech("The decision model failed to respond.")
@@ -613,6 +648,17 @@ class DualModelConversationEntity(conversation.ConversationEntity):
         domain = action_data.get("domain")
         service = action_data.get("service")
         entity_id = action_data.get("entity_id")
+
+        if action_data.get("rejected") or domain == "not_found":
+            not_found_msg = (
+                f"Device {entity_id} was not found."
+                if entity_id and str(entity_id).lower() != "none"
+                else "I could not find that device."
+            )
+            intent_response.async_set_speech(not_found_msg)
+            return conversation.ConversationResult(
+                response=intent_response, conversation_id=user_input.conversation_id
+            )
 
         current_time = datetime.datetime.now().strftime("%I:%M %p on %A, %B %d")
         sys2_template = self.config_data.get("sys2_prompt", self.default_sys2)
@@ -625,6 +671,11 @@ class DualModelConversationEntity(conversation.ConversationEntity):
         # Parameterized script: System 2 fills parameters from the original prompt,
         # then we execute the script with those variables.
         if domain == "script" and "script_template" in action_data:
+            if ("EXECUTE", entity_id) not in allowed_entries:
+                intent_response.async_set_speech(f"Device {entity_id} was not found.")
+                return conversation.ConversationResult(
+                    response=intent_response, conversation_id=user_input.conversation_id
+                )
             target_state = self.hass.states.get(entity_id) if entity_id else None
             if target_state is None or target_state.state in ("unavailable", "unknown"):
                 intent_response.async_set_speech(
